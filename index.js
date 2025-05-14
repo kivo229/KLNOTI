@@ -27,8 +27,8 @@ const config = {
 };
 
 // Store for the last notifications (in memory only)
-let lastNotifications = [];
-let lastResults = [];
+let lastNotificationDate = '';
+let lastResultDate = '';
 
 // Initialize Telegram bot
 const bot = new TelegramBot(config.telegramBotToken, { polling: false });
@@ -43,7 +43,7 @@ app.listen(PORT, () => {
   console.log(`Keep-alive server running on port ${PORT}`);
 });
 
-// Scraper function to get all latest notifications or results for a specific date
+// Scraper function to get latest notifications or results for a specific date
 async function scrapeContent(type) {
     try {
         const url = type === 'notifications' ? config.targetUrls.notifications : config.targetUrls.results;
@@ -56,34 +56,44 @@ async function scrapeContent(type) {
         });
         const $ = cheerio.load(response.data);
         
-        // Get the latest publish date
-        const publishDate = $('tr.tableHeading td').first().text().replace('Published on', '').trim();
-        
-        // Find all notifications/results for the latest publish date
-        const results = [];
-        let currentDate = '';
-        
-        // Loop through table rows
-        $('tr').each((i, element) => {
-            // If it's a heading row (date), update the current date
-            if ($(element).hasClass('tableHeading')) {
-                currentDate = $(element).find('td').first().text().replace('Published on', '').trim();
-            }
-            // If it's a content row and matches the latest date
-            else if ($(element).hasClass('displayList') && currentDate === publishDate) {
-                const content = $(element).find('td').eq(1).text().trim();
-                const pdfLink = $(element).find('td').eq(2).find('a').attr('href') || '';
-                
-                results.push({
-                    content,
-                    publishDate,
-                    pdfLink,
-                    type
-                });
-            }
+        // Get all published dates
+        const publishDates = [];
+        $('tr.tableHeading').each((i, el) => {
+            const date = $(el).find('td').first().text().replace('Published on', '').trim();
+            publishDates.push({
+                date: date,
+                index: i
+            });
         });
         
-        return results;
+        if (publishDates.length === 0) {
+            console.log(`[${new Date().toLocaleString()}] No ${type} dates found.`);
+            return [];
+        }
+        
+        // Get the latest published date
+        const latestDate = publishDates[0];
+        
+        // Find all displayList rows until next tableHeading or end of table
+        const notifications = [];
+        let currentRow = $('tr.tableHeading').eq(0).next();
+        
+        while (currentRow.length > 0 && !currentRow.hasClass('tableHeading')) {
+            if (currentRow.hasClass('displayList')) {
+                const content = currentRow.find('td').eq(1).text().trim();
+                const pdfLink = currentRow.find('td').eq(2).find('a').attr('href') || '';
+                
+                notifications.push({
+                    content: content,
+                    publishDate: latestDate.date,
+                    pdfLink: pdfLink,
+                    type: type
+                });
+            }
+            currentRow = currentRow.next();
+        }
+        
+        return notifications;
     } catch (error) {
         console.error(`[${new Date().toLocaleString()}] Error scraping ${type}:`, error.message);
         return [];
@@ -133,14 +143,6 @@ async function testTelegramConnection() {
     }
 }
 
-// Helper function to check if an item is new (not in the last items list)
-function isNewItem(item, lastItems) {
-    return !lastItems.some(lastItem => 
-        lastItem.content === item.content && 
-        lastItem.publishDate === item.publishDate
-    );
-}
-
 // Initialize the monitoring process
 async function initializeMonitoring() {
     // Test Telegram connection first
@@ -157,21 +159,22 @@ async function initializeMonitoring() {
             // Check for new notifications
             const notifications = await scrapeContent('notifications');
             if (notifications && notifications.length > 0) {
-                console.log('[' + new Date().toLocaleString() + '] Found ' + notifications.length + ' notifications');
+                const latestDate = notifications[0].publishDate;
+                console.log('[' + new Date().toLocaleString() + `] Found ${notifications.length} notifications for date ${latestDate}`);
                 
-                // Filter out only new notifications
-                const newNotifications = notifications.filter(item => isNewItem(item, lastNotifications));
-                
-                if (newNotifications.length > 0) {
-                    console.log('[' + new Date().toLocaleString() + '] ' + newNotifications.length + ' new notifications detected!');
+                // Check if notification date has changed
+                if (latestDate !== lastNotificationDate) {
+                    console.log('[' + new Date().toLocaleString() + '] New notifications detected!');
                     
-                    // Send each new notification
-                    for (const notification of newNotifications) {
+                    // Send all notifications to Telegram channel
+                    for (const notification of notifications) {
                         await sendNotification(notification);
+                        // Add a small delay between messages to prevent flooding
+                        await new Promise(resolve => setTimeout(resolve, 2000));
                     }
                     
-                    // Update last notifications in memory
-                    lastNotifications = [...notifications];
+                    // Update last notification date in memory
+                    lastNotificationDate = latestDate;
                 } else {
                     console.log('[' + new Date().toLocaleString() + '] No new notifications');
                 }
@@ -180,21 +183,22 @@ async function initializeMonitoring() {
             // Check for new results
             const results = await scrapeContent('results');
             if (results && results.length > 0) {
-                console.log('[' + new Date().toLocaleString() + '] Found ' + results.length + ' results');
+                const latestDate = results[0].publishDate;
+                console.log('[' + new Date().toLocaleString() + `] Found ${results.length} results for date ${latestDate}`);
                 
-                // Filter out only new results
-                const newResults = results.filter(item => isNewItem(item, lastResults));
-                
-                if (newResults.length > 0) {
-                    console.log('[' + new Date().toLocaleString() + '] ' + newResults.length + ' new results detected!');
+                // Check if result date has changed
+                if (latestDate !== lastResultDate) {
+                    console.log('[' + new Date().toLocaleString() + '] New results detected!');
                     
-                    // Send each new result
-                    for (const result of newResults) {
+                    // Send all results to Telegram channel
+                    for (const result of results) {
                         await sendNotification(result);
+                        // Add a small delay between messages to prevent flooding
+                        await new Promise(resolve => setTimeout(resolve, 2000));
                     }
                     
-                    // Update last results in memory
-                    lastResults = [...results];
+                    // Update last result date in memory
+                    lastResultDate = latestDate;
                 } else {
                     console.log('[' + new Date().toLocaleString() + '] No new results');
                 }
@@ -204,27 +208,39 @@ async function initializeMonitoring() {
         }
     });
     
-    // Send latest content on startup (but don't set as "last" to avoid duplication)
+    // Run immediately on startup to check and send the latest data
     (async () => {
         try {
             console.log('[' + new Date().toLocaleString() + '] Bot started! Sending latest notifications and results...');
             
-            // Get latest notifications
+            // Get and send latest notifications
             const notifications = await scrapeContent('notifications');
             if (notifications && notifications.length > 0) {
-                // Only send the most recent one on startup to avoid flooding
-                await sendNotification(notifications[0]);
-                // Store all as "last" to avoid resending
-                lastNotifications = [...notifications];
+                const latestDate = notifications[0].publishDate;
+                console.log('[' + new Date().toLocaleString() + `] Sending ${notifications.length} notifications for date ${latestDate}`);
+                
+                for (const notification of notifications) {
+                    await sendNotification(notification);
+                    // Add a small delay between messages to prevent flooding
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                }
+                
+                lastNotificationDate = latestDate;
             }
             
-            // Get latest results
+            // Get and send latest results
             const results = await scrapeContent('results');
             if (results && results.length > 0) {
-                // Only send the most recent one on startup to avoid flooding
-                await sendNotification(results[0]);
-                // Store all as "last" to avoid resending
-                lastResults = [...results];
+                const latestDate = results[0].publishDate;
+                console.log('[' + new Date().toLocaleString() + `] Sending ${results.length} results for date ${latestDate}`);
+                
+                for (const result of results) {
+                    await sendNotification(result);
+                    // Add a small delay between messages to prevent flooding
+                    await new Promise(resolve => setTimeout(resolve, 2000));
+                }
+                
+                lastResultDate = latestDate;
             }
             
         } catch (error) {
