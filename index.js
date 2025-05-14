@@ -27,8 +27,8 @@ const config = {
 };
 
 // Store for the last notifications (in memory only)
-let lastNotificationContent = '';
-let lastResultContent = '';
+let lastNotifications = [];
+let lastResults = [];
 
 // Initialize Telegram bot
 const bot = new TelegramBot(config.telegramBotToken, { polling: false });
@@ -133,6 +133,14 @@ async function testTelegramConnection() {
     }
 }
 
+// Helper function to check if an item is new (not in the last items list)
+function isNewItem(item, lastItems) {
+    return !lastItems.some(lastItem => 
+        lastItem.content === item.content && 
+        lastItem.publishDate === item.publishDate
+    );
+}
+
 // Initialize the monitoring process
 async function initializeMonitoring() {
     // Test Telegram connection first
@@ -147,42 +155,46 @@ async function initializeMonitoring() {
     cron.schedule(config.checkInterval, async () => {
         try {
             // Check for new notifications
-            const notification = await scrapeContent('notifications');
-            if (notification) {
-                console.log('[' + new Date().toLocaleString() + '] Latest notification:', notification.content);
+            const notifications = await scrapeContent('notifications');
+            if (notifications && notifications.length > 0) {
+                console.log('[' + new Date().toLocaleString() + '] Found ' + notifications.length + ' notifications');
                 
-                // Check if notification has changed
-                if (notification.content && notification.content !== lastNotificationContent) {
-                    console.log('[' + new Date().toLocaleString() + '] New notification detected!');
+                // Filter out only new notifications
+                const newNotifications = notifications.filter(item => isNewItem(item, lastNotifications));
+                
+                if (newNotifications.length > 0) {
+                    console.log('[' + new Date().toLocaleString() + '] ' + newNotifications.length + ' new notifications detected!');
                     
-                    // Send notification to Telegram channel
-                    const sent = await sendNotification(notification);
-                    
-                    if (sent) {
-                        // Update last notification in memory
-                        lastNotificationContent = notification.content;
+                    // Send each new notification
+                    for (const notification of newNotifications) {
+                        await sendNotification(notification);
                     }
+                    
+                    // Update last notifications in memory
+                    lastNotifications = [...notifications];
                 } else {
                     console.log('[' + new Date().toLocaleString() + '] No new notifications');
                 }
             }
             
             // Check for new results
-            const result = await scrapeContent('results');
-            if (result) {
-                console.log('[' + new Date().toLocaleString() + '] Latest result:', result.content);
+            const results = await scrapeContent('results');
+            if (results && results.length > 0) {
+                console.log('[' + new Date().toLocaleString() + '] Found ' + results.length + ' results');
                 
-                // Check if result has changed
-                if (result.content && result.content !== lastResultContent) {
-                    console.log('[' + new Date().toLocaleString() + '] New result detected!');
+                // Filter out only new results
+                const newResults = results.filter(item => isNewItem(item, lastResults));
+                
+                if (newResults.length > 0) {
+                    console.log('[' + new Date().toLocaleString() + '] ' + newResults.length + ' new results detected!');
                     
-                    // Send result to Telegram channel
-                    const sent = await sendNotification(result);
-                    
-                    if (sent) {
-                        // Update last result in memory
-                        lastResultContent = result.content;
+                    // Send each new result
+                    for (const result of newResults) {
+                        await sendNotification(result);
                     }
+                    
+                    // Update last results in memory
+                    lastResults = [...results];
                 } else {
                     console.log('[' + new Date().toLocaleString() + '] No new results');
                 }
@@ -192,23 +204,27 @@ async function initializeMonitoring() {
         }
     });
     
-    // Run immediately on startup to check and send the latest data
+    // Send latest content on startup (but don't set as "last" to avoid duplication)
     (async () => {
         try {
             console.log('[' + new Date().toLocaleString() + '] Bot started! Sending latest notifications and results...');
             
-            // Get and send latest notification
-            const notification = await scrapeContent('notifications');
-            if (notification) {
-                await sendNotification(notification);
-                lastNotificationContent = notification.content;
+            // Get latest notifications
+            const notifications = await scrapeContent('notifications');
+            if (notifications && notifications.length > 0) {
+                // Only send the most recent one on startup to avoid flooding
+                await sendNotification(notifications[0]);
+                // Store all as "last" to avoid resending
+                lastNotifications = [...notifications];
             }
             
-            // Get and send latest result
-            const result = await scrapeContent('results');
-            if (result) {
-                await sendNotification(result);
-                lastResultContent = result.content;
+            // Get latest results
+            const results = await scrapeContent('results');
+            if (results && results.length > 0) {
+                // Only send the most recent one on startup to avoid flooding
+                await sendNotification(results[0]);
+                // Store all as "last" to avoid resending
+                lastResults = [...results];
             }
             
         } catch (error) {
