@@ -11,17 +11,17 @@ const express = require('express'); // Required for Replit keep-alive
 // Configuration - USE REPLIT SECRETS FOR THESE!
 const config = {
     // Telegram Bot Token (set in Replit Secrets)
-    telegramBotToken: '8064456014:AAEcjffqcaLUAMyDnTjTDzDmLFGZsOMZVaw',
-
+    telegramBotToken: process.env.TELEGRAM_TOKEN || '8064456014:AAEcjffqcaLUAMyDnTjTDzDmLFGZsOMZVaw',
+    
     // Telegram Channel ID/Username (set in Replit Secrets)
-    telegramChannelId: '@KLUNINOTIFY' ,
-
+    telegramChannelId: process.env.CHANNEL_ID || '@KLUNINOTIFY',
+    
     // Target websites to scrape
     targetUrls: {
         notifications: 'https://exams.keralauniversity.ac.in/Login/check1/==QOBRkVRpEbRdVOrJVYatmV',
         results: 'https://exams.keralauniversity.ac.in/Login/check8/==QOBRkVRpEbRdVOrJVYatmV'
     },
-
+    
     // How often to check for updates (every 5 minutes)
     checkInterval: '*/5 * * * *'
 };
@@ -41,45 +41,52 @@ app.get('/', (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Keep-alive server running on port ${PORT}`);
-  
-  // Self-ping every 5 minutes to prevent idle timeout
-  setInterval(() => {
-    axios.get(`https://${process.env.REPL_SLUG}.${process.env.REPL_OWNER}.repl.co`)
-      .catch(err => console.log('Self-ping failed:', err.message));
-  }, 4 * 60 * 1000); // 4 minutes
 });
 
-// Scraper function to get latest notification or result
+// Scraper function to get all latest notifications or results for a specific date
 async function scrapeContent(type) {
     try {
         const url = type === 'notifications' ? config.targetUrls.notifications : config.targetUrls.results;
         console.log(`[${new Date().toLocaleString()}] Checking for new ${type}...`);
-
+        
         const response = await axios.get(url, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
             }
         });
         const $ = cheerio.load(response.data);
-
-        // Target the first published date
+        
+        // Get the latest publish date
         const publishDate = $('tr.tableHeading td').first().text().replace('Published on', '').trim();
-
-        // Target the first notification content that follows the date
-        const latestContent = $('tr.displayList td').eq(1).text().trim();
-
-        // Extract PDF link for the notification
-        const pdfLink = $('tr.displayList td').eq(2).find('a').attr('href') || '';
-
-        return {
-            content: latestContent,
-            publishDate: publishDate,
-            pdfLink: pdfLink,
-            type: type
-        };
+        
+        // Find all notifications/results for the latest publish date
+        const results = [];
+        let currentDate = '';
+        
+        // Loop through table rows
+        $('tr').each((i, element) => {
+            // If it's a heading row (date), update the current date
+            if ($(element).hasClass('tableHeading')) {
+                currentDate = $(element).find('td').first().text().replace('Published on', '').trim();
+            }
+            // If it's a content row and matches the latest date
+            else if ($(element).hasClass('displayList') && currentDate === publishDate) {
+                const content = $(element).find('td').eq(1).text().trim();
+                const pdfLink = $(element).find('td').eq(2).find('a').attr('href') || '';
+                
+                results.push({
+                    content,
+                    publishDate,
+                    pdfLink,
+                    type
+                });
+            }
+        });
+        
+        return results;
     } catch (error) {
         console.error(`[${new Date().toLocaleString()}] Error scraping ${type}:`, error.message);
-        return null;
+        return [];
     }
 }
 
@@ -88,24 +95,24 @@ async function sendNotification(data) {
     try {
         // Add PDF link if available
         const pdfLinkSection = data.pdfLink ? `\n\n📎 [Download PDF](${data.pdfLink})` : '';
-
+        
         // Create message based on content type
-        let title;
+        let title, source;
         if (data.type === 'notifications') {
             title = '🔔 *NEW EXAM NOTIFICATION* 🔔';
-           
+            source = '_Source: Kerala University Examinations Portal - Notifications_';
         } else {
             title = '📊 *NEW EXAM RESULT* 📊';
-            
+            source = '_Source: Kerala University Examinations Portal - Results_';
         }
-
-        const message = `${title}\n\n📅 *Published on:* ${data.publishDate}\n\n${data.content}${pdfLinkSection}\n\n`;
-
+        
+        const message = `${title}\n\n📅 *Published on:* ${data.publishDate}\n\n${data.content}${pdfLinkSection}\n\n${source}`;
+        
         await bot.sendMessage(config.telegramChannelId, message, {
             parse_mode: 'Markdown',
             disable_web_page_preview: false // Enable link preview for PDF
         });
-
+        
         console.log(`[${new Date().toLocaleString()}] ${data.type === 'notifications' ? 'Notification' : 'Result'} sent to Telegram channel successfully`);
         return true;
     } catch (error) {
@@ -130,12 +137,12 @@ async function testTelegramConnection() {
 async function initializeMonitoring() {
     // Test Telegram connection first
     const telegramConnected = await testTelegramConnection();
-
+    
     if (!telegramConnected) {
         console.error('[' + new Date().toLocaleString() + '] Cannot start monitoring without Telegram connection. Please check your token and internet connection.');
         process.exit(1);
     }
-
+    
     // Schedule periodic checks
     cron.schedule(config.checkInterval, async () => {
         try {
@@ -143,14 +150,14 @@ async function initializeMonitoring() {
             const notification = await scrapeContent('notifications');
             if (notification) {
                 console.log('[' + new Date().toLocaleString() + '] Latest notification:', notification.content);
-
+                
                 // Check if notification has changed
                 if (notification.content && notification.content !== lastNotificationContent) {
                     console.log('[' + new Date().toLocaleString() + '] New notification detected!');
-
+                    
                     // Send notification to Telegram channel
                     const sent = await sendNotification(notification);
-
+                    
                     if (sent) {
                         // Update last notification in memory
                         lastNotificationContent = notification.content;
@@ -159,19 +166,19 @@ async function initializeMonitoring() {
                     console.log('[' + new Date().toLocaleString() + '] No new notifications');
                 }
             }
-
+            
             // Check for new results
             const result = await scrapeContent('results');
             if (result) {
                 console.log('[' + new Date().toLocaleString() + '] Latest result:', result.content);
-
+                
                 // Check if result has changed
                 if (result.content && result.content !== lastResultContent) {
                     console.log('[' + new Date().toLocaleString() + '] New result detected!');
-
+                    
                     // Send result to Telegram channel
                     const sent = await sendNotification(result);
-
+                    
                     if (sent) {
                         // Update last result in memory
                         lastResultContent = result.content;
@@ -184,43 +191,42 @@ async function initializeMonitoring() {
             console.error('[' + new Date().toLocaleString() + '] Error in monitoring process:', error.message);
         }
     });
-
+    
     // Run immediately on startup to check and send the latest data
     (async () => {
         try {
             console.log('[' + new Date().toLocaleString() + '] Bot started! Sending latest notifications and results...');
-
+            
             // Get and send latest notification
             const notification = await scrapeContent('notifications');
             if (notification) {
                 await sendNotification(notification);
                 lastNotificationContent = notification.content;
             }
-
+            
             // Get and send latest result
             const result = await scrapeContent('results');
             if (result) {
                 await sendNotification(result);
                 lastResultContent = result.content;
             }
-
+            
         } catch (error) {
             console.error('[' + new Date().toLocaleString() + '] Error in initial check:', error.message);
         }
     })();
-
+    
     console.log('[' + new Date().toLocaleString() + `] Monitoring started. Checking every ${config.checkInterval}`);
     console.log('[' + new Date().toLocaleString() + `] Updates will be sent to Telegram channel: ${config.telegramChannelId}`);
 }
 
 // Main function
 async function main() {
-    console.log(`https://${process.env.REPL_SLUG}.${process.env.REPL_OWNER}.repl.co`);
     console.log('[' + new Date().toLocaleString() + '] Starting Telegram Exam Updates Bot...');
     console.log('[' + new Date().toLocaleString() + '] Target URLs:', 
                 '\n- Notifications:', config.targetUrls.notifications,
                 '\n- Results:', config.targetUrls.results);
-
+    
     // Initialize and start monitoring
     await initializeMonitoring();
 }
